@@ -209,7 +209,12 @@ describe('Resources API Integration Tests', function() {
     });
 
     it('should reject request with invalid category', function(done) {
-      const testFilePath = path.join(__dirname, '../fixtures/test.txt');
+      const fixturesDir = path.join(__dirname, '../fixtures');
+      if (!fs.existsSync(fixturesDir)) {
+        fs.mkdirSync(fixturesDir, { recursive: true });
+      }
+      
+      const testFilePath = path.join(fixturesDir, 'test.txt');
       fs.writeFileSync(testFilePath, 'Test file content');
 
       request(app)
