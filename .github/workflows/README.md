@@ -2,27 +2,34 @@
 
 ## 🎯 Overview
 
-Questo repository utilizza GitHub Actions per implementare un pipeline CI/CD completo:
+Questo repository utilizza GitHub Actions per implementare un pipeline CI/CD completo con **protezioni di sicurezza**:
 
 - **CI (Continuous Integration)**: Test automatici ad ogni push/PR
-- **CD (Continuous Deployment)**: Deploy automatico su AWS ad ogni push su `main`
+- **CD (Continuous Deployment)**: Deploy automatico su AWS **SOLO** se i test passano
 
 ## 📁 Workflows
 
-### 1. `ci.yml` - Continuous Integration
-- **Trigger**: Push su `main`/`develop`, PR verso `main`
-- **Funzioni**:
-  - Esegue test di integrazione con PostgreSQL
-  - Controllo qualità del codice
-  - Security audit delle dipendenze
+### `ci-cd.yml` - Pipeline Completo con Protezioni
+- **Trigger**: 
+  - Push su `main`/`develop` 
+  - PR verso `main`
+  - Attivazione manuale
+- **🔒 Vincoli di Sicurezza**:
+  - **Deploy SOLO su branch `main`**
+  - **Deploy SOLO se tutti i test passano** 
+  - **Deploy SOLO su push (non su PR)**
 
-### 2. `deploy.yml` - Continuous Deployment
-- **Trigger**: Push su `main` branch
-- **Funzioni**:
-  - Deploy infrastruttura AWS con CDK
-  - Deploy applicazione su EC2
-  - Health check automatico
-  - Notifiche di deployment
+#### Fasi del Pipeline:
+1. **✅ FASE TEST**: Sempre eseguita
+   - Test di integrazione con PostgreSQL
+   - Controllo qualità del codice  
+   - Security audit delle dipendenze
+   
+2. **🚀 FASE DEPLOY**: Solo se test OK + main branch
+   - Deploy infrastruttura AWS con CDK
+   - Deploy applicazione su EC2
+   - Health check automatico
+   - Notifiche di deployment
 
 ## 🔧 Setup Required
 

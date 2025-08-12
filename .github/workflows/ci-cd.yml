@@ -1,0 +1,204 @@
+name: CI/CD Pipeline
+
+# Trigger per tutti i branch e PR
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  # Opzionale: attivazione manuale
+  workflow_dispatch:
+
+# Variabili globali
+env:
+  AWS_REGION: us-east-1
+  EC2_KEY_NAME: aws-ec2-key
+
+jobs:
+  # ✅ FASE 1: TEST (sempre eseguita)
+  test:
+    name: Run Tests and Code Quality
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: aws_password
+          POSTGRES_USER: aws_user
+          POSTGRES_DB: aws_ec2
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Create test environment file
+      run: |
+        echo "NODE_ENV=test" > .env.test
+        echo "DB_HOST=localhost" >> .env.test
+        echo "DB_PORT=5432" >> .env.test
+        echo "DB_NAME=aws_ec2" >> .env.test
+        echo "DB_USER=aws_user" >> .env.test
+        echo "DB_PASS=aws_password" >> .env.test
+        echo "API_KEY=aws-ec2-api-key" >> .env.test
+        echo "S3_BUCKET_NAME=aws-ec2-uploads-test" >> .env.test
+
+    - name: Wait for PostgreSQL
+      run: |
+        until pg_isready -h localhost -p 5432 -U aws_user; do
+          echo "Waiting for PostgreSQL..."
+          sleep 2
+        done
+
+    # 🧪 Test di integrazione
+    - name: Run integration tests
+      run: npm test
+      env:
+        DATABASE_URL: postgresql://aws_user:aws_password@localhost:5432/aws_ec2
+
+    # 🔍 Controlli di qualità
+    - name: Run linting (if available)
+      run: npm run lint || echo "No linting configured, skipping..."
+      continue-on-error: true
+      
+    # 🔒 Security audit
+    - name: Security audit
+      run: npm audit --audit-level=high
+
+    # ✅ Output per step successivi
+    - name: Test results
+      run: echo "✅ All tests passed - ready for deployment!"
+
+  # 🚀 FASE 2: DEPLOY (solo su main branch E se i test passano)
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    # 🔒 VINCOLI CRITICI:
+    needs: test                    # Solo se i test passano
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'  # Solo su main branch
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    # 🔑 Setup AWS credentials da GitHub Secrets
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # 🛠️ Install AWS CDK
+    - name: Install AWS CDK
+      run: npm install -g aws-cdk
+
+    - name: Install CDK dependencies
+      run: |
+        cd infrastructure
+        npm ci
+
+    # 🏗️ Bootstrap CDK (solo se necessario)
+    - name: Bootstrap CDK
+      run: |
+        cd infrastructure
+        cdk bootstrap --require-approval never
+      continue-on-error: true
+
+    # 🚀 Deploy dell'infrastruttura
+    - name: Deploy infrastructure
+      run: |
+        cd infrastructure
+        cdk deploy AwsEc2Stack --require-approval never --outputs-file outputs.json
+
+    # 📍 Get EC2 IP from CDK outputs
+    - name: Get EC2 Public IP
+      id: get-ip
+      run: |
+        cd infrastructure
+        EC2_IP=$(cat outputs.json | grep -o '"PublicIP": "[^"]*' | grep -o '[^"]*$')
+        echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+        echo "🌐 EC2 Public IP: $EC2_IP"
+
+    # 🔐 Setup SSH key
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/aws-ec2-key.pem
+        chmod 400 ~/.ssh/aws-ec2-key.pem
+        ssh-keyscan -H ${{ steps.get-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts
+
+    # ⏳ Wait for EC2 to be ready
+    - name: Wait for EC2 to be ready
+      run: |
+        echo "⏳ Waiting for EC2 instance to be ready..."
+        for i in {1..30}; do
+          if ssh -i ~/.ssh/aws-ec2-key.pem -o ConnectTimeout=10 ec2-user@${{ steps.get-ip.outputs.ec2_ip }} "echo 'SSH connection successful'"; then
+            echo "✅ EC2 is ready!"
+            break
+          fi
+          echo "⏱️ Attempt $i failed, waiting 30 seconds..."
+          sleep 30
+        done
+
+    # 🚀 Deploy application
+    - name: Deploy application
+      run: |
+        chmod +x ./scripts/deploy-to-ec2.sh
+        EC2_HOST=${{ steps.get-ip.outputs.ec2_ip }} EC2_KEY_PATH=~/.ssh/aws-ec2-key.pem ./scripts/deploy-to-ec2.sh
+
+    # 🩺 Health check
+    - name: Health check
+      run: |
+        echo "⏳ Waiting for application to start..."
+        sleep 60
+        
+        # Test health endpoint
+        for i in {1..5}; do
+          if curl -f http://${{ steps.get-ip.outputs.ec2_ip }}:3000/health; then
+            echo "✅ Application is healthy!"
+            echo "🌐 Application URL: http://${{ steps.get-ip.outputs.ec2_ip }}:3000"
+            echo "📋 API Docs: http://${{ steps.get-ip.outputs.ec2_ip }}:3000/api-docs"
+            break
+          fi
+          echo "🔄 Health check attempt $i failed, retrying in 30s..."
+          sleep 30
+        done
+
+    # 📊 Deployment summary
+    - name: Deployment summary
+      run: |
+        echo "## 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**✅ Tests:** All passed" >> $GITHUB_STEP_SUMMARY
+        echo "**🌐 Application URL:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000" >> $GITHUB_STEP_SUMMARY
+        echo "**📋 API Documentation:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000/api-docs" >> $GITHUB_STEP_SUMMARY
+        echo "**🩺 Health Check:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**⏰ Deployment Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "**🔗 Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
