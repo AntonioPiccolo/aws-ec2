@@ -1,0 +1,40 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://aws_user:aws_password@db:5432/aws_ec2
+      - S3_BUCKET_NAME=aws-ec2-files-129192343513
+      - API_KEY=aws-ec2-api-key
+    depends_on:
+      - db
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-south-1
+        awslogs-group: aws-ec2-app
+        awslogs-create-group: "true"
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=aws_ec2
+      - POSTGRES_USER=aws_user
+      - POSTGRES_PASSWORD=aws_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: eu-south-1
+        awslogs-group: aws-ec2-db
+        awslogs-create-group: "true"
+
+volumes:
+  postgres_data:

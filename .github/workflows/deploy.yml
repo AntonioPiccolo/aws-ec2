@@ -1,0 +1,132 @@
+name: CD - Deploy to AWS
+
+# Si attiva solo dopo che il CI è passato e siamo su main
+on:
+  push:
+    branches: [ main ]
+  # Opzionale: attivazione manuale
+  workflow_dispatch:
+
+# Variabili globali
+env:
+  AWS_REGION: us-east-1
+  EC2_KEY_NAME: aws-ec2-key
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    # Solo se i test sono passati (se il CI è configurato per girare prima)
+    # needs: test
+    
+    steps:
+    # 1. Checkout del codice
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Setup Node.js per CDK
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+
+    # 3. Install dependencies
+    - name: Install dependencies
+      run: npm ci
+
+    # 4. Setup AWS credentials da GitHub Secrets
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # 5. Install AWS CDK
+    - name: Install AWS CDK
+      run: npm install -g aws-cdk
+
+    # 6. Install infrastructure dependencies
+    - name: Install CDK dependencies
+      run: |
+        cd infrastructure
+        npm ci
+
+    # 7. Bootstrap CDK (solo se necessario, in genere si fa una volta)
+    - name: Bootstrap CDK
+      run: |
+        cd infrastructure
+        cdk bootstrap --require-approval never
+      continue-on-error: true
+
+    # 8. Deploy dell'infrastruttura
+    - name: Deploy infrastructure
+      run: |
+        cd infrastructure
+        cdk deploy AwsEc2Stack --require-approval never --outputs-file outputs.json
+
+    # 9. Get EC2 IP from CDK outputs
+    - name: Get EC2 Public IP
+      id: get-ip
+      run: |
+        cd infrastructure
+        EC2_IP=$(cat outputs.json | grep -o '"PublicIP": "[^"]*' | grep -o '[^"]*$')
+        echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+        echo "EC2 Public IP: $EC2_IP"
+
+    # 10. Setup SSH key
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/aws-ec2-key.pem
+        chmod 400 ~/.ssh/aws-ec2-key.pem
+        ssh-keyscan -H ${{ steps.get-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts
+
+    # 11. Wait for EC2 to be ready
+    - name: Wait for EC2 to be ready
+      run: |
+        echo "Waiting for EC2 instance to be ready..."
+        for i in {1..30}; do
+          if ssh -i ~/.ssh/aws-ec2-key.pem -o ConnectTimeout=10 ec2-user@${{ steps.get-ip.outputs.ec2_ip }} "echo 'SSH connection successful'"; then
+            echo "EC2 is ready!"
+            break
+          fi
+          echo "Attempt $i failed, waiting 30 seconds..."
+          sleep 30
+        done
+
+    # 12. Deploy application using our script
+    - name: Deploy application
+      run: |
+        chmod +x ./scripts/deploy-to-ec2.sh
+        EC2_HOST=${{ steps.get-ip.outputs.ec2_ip }} EC2_KEY_PATH=~/.ssh/aws-ec2-key.pem ./scripts/deploy-to-ec2.sh
+
+    # 13. Health check
+    - name: Health check
+      run: |
+        echo "Waiting for application to start..."
+        sleep 60
+        
+        # Test health endpoint
+        for i in {1..5}; do
+          if curl -f http://${{ steps.get-ip.outputs.ec2_ip }}:3000/health; then
+            echo "✅ Application is healthy!"
+            echo "🌐 Application URL: http://${{ steps.get-ip.outputs.ec2_ip }}:3000"
+            echo "📋 API Docs: http://${{ steps.get-ip.outputs.ec2_ip }}:3000/api-docs"
+            break
+          fi
+          echo "Health check attempt $i failed, retrying in 30s..."
+          sleep 30
+        done
+
+    # 14. Notify deployment success
+    - name: Deployment summary
+      run: |
+        echo "## 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Application URL:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000" >> $GITHUB_STEP_SUMMARY
+        echo "**API Documentation:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000/api-docs" >> $GITHUB_STEP_SUMMARY
+        echo "**Health Check:** http://${{ steps.get-ip.outputs.ec2_ip }}:3000/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment Time:** $(date)" >> $GITHUB_STEP_SUMMARY
